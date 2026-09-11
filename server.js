@@ -1,7 +1,5 @@
-require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
 
@@ -10,25 +8,43 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_PIN_SECRET = process.env.ADMIN_PIN || "123456";
 
-// MANAJEMEN DATABASE API KEYS (FILE JSON)
-const DB_FILE = path.join(__dirname, 'apikeys.json');
+// Path File Database Lokal
+const DB_KEYS_FILE = path.join(__dirname, 'apikeys.json');
+const DB_ADMIN_FILE = path.join(__dirname, 'admin_config.json');
 
+// Get Kode Rahasia Admin (Default: 67678)
+function getAdminCode() {
+  if (!fs.existsSync(DB_ADMIN_FILE)) {
+    const defaultConfig = { code: process.env.ADMIN_PIN || "67678" };
+    fs.writeFileSync(DB_ADMIN_FILE, JSON.stringify(defaultConfig, null, 2));
+    return defaultConfig.code;
+  }
+  const config = JSON.parse(fs.readFileSync(DB_ADMIN_FILE, 'utf-8'));
+  return config.code;
+}
+
+// Simpan Kode Rahasia Admin Baru
+function saveAdminCode(newCode) {
+  fs.writeFileSync(DB_ADMIN_FILE, JSON.stringify({ code: newCode }, null, 2));
+}
+
+// Get API Keys
 function getApiKeys() {
-  if (!fs.existsSync(DB_FILE)) {
-    const defaultKeys = [{ key: "MY_SECRET_API_KEY_123", active: true }];
-    fs.writeFileSync(DB_FILE, JSON.stringify(defaultKeys, null, 2));
+  if (!fs.existsSync(DB_KEYS_FILE)) {
+    // API Key bawaan agar langsung bisa digunakan tanpa buat manual dulu
+    const defaultKeys = [{ key: "APIKEY123", active: true }];
+    fs.writeFileSync(DB_KEYS_FILE, JSON.stringify(defaultKeys, null, 2));
     return defaultKeys;
   }
-  return JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
+  return JSON.parse(fs.readFileSync(DB_KEYS_FILE, 'utf-8'));
 }
 
+// Simpan API Keys
 function saveApiKeys(keys) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(keys, null, 2));
+  fs.writeFileSync(DB_KEYS_FILE, JSON.stringify(keys, null, 2));
 }
 
-// HELPER: FORMAT EMAIL & SUPPORT CUSTOM/TEMP MAIL
 function formatTargetEmail(inputEmail) {
   let email = inputEmail.trim();
   if (!email.includes('@')) {
@@ -37,163 +53,120 @@ function formatTargetEmail(inputEmail) {
   return email.toLowerCase();
 }
 
-// MIDDLEWARE VALIDASI API KEY
+// Middleware Validasi API Key User
 const validateApiKey = (req, res, next) => {
   const apiKey = req.query.apikey || req.headers['x-api-key'];
   const keys = getApiKeys();
-
   const foundKey = keys.find(k => k.key === apiKey);
 
-  if (!foundKey) {
-    return res.status(401).json({ status: false, message: 'API Key tidak ditemukan / tidak valid!' });
-  }
-
-  if (!foundKey.active) {
-    return res.status(403).json({ status: false, message: 'API Key telah dinonaktifkan (Disabled) oleh Admin!' });
-  }
+  if (!foundKey) return res.status(401).json({ status: false, message: 'API Key tidak valid!' });
+  if (!foundKey.active) return res.status(403).json({ status: false, message: 'API Key sedang non-aktif (Disabled)!' });
 
   next();
 };
 
-// MIDDLEWARE VALIDASI PIN ADMIN
-const validateAdminPin = (req, res, next) => {
-  const pin = req.query.pin || req.body.pin;
-  if (pin !== ADMIN_PIN_SECRET) {
-    return res.status(401).json({ status: false, message: 'PIN Admin tidak valid!' });
+// Middleware Validasi Kode Rahasia Admin
+const validateAdminCode = (req, res, next) => {
+  const code = req.query.code || req.body.code;
+  const currentAdminCode = getAdminCode();
+  if (code !== currentAdminCode) {
+    return res.status(401).json({ status: false, message: 'Kode Rahasia Admin Salah!' });
   }
   next();
 };
 
-// KONFIGURASI NODEMAILER
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD
-  }
-});
-
-// SIMPAN VERIFICATION CODES SEMENTARA
 const pendingVerifications = new Map();
 
-// ==================== ENDPOINT REST API ==================== //
+// ==================== ENDPOINT USER ==================== //
 
-// 1. ENDPOINT: Send Magic Link (Mendukung Temp Mail / Custom Domain)
-app.get('/api/alight/send', validateApiKey, async (req, res) => {
-  try {
-    let { email } = req.query;
-    if (!email) return res.status(400).json({ status: false, message: 'Parameter email wajib diisi!' });
+app.get('/api/alight/send', validateApiKey, (req, res) => {
+  let { email } = req.query;
+  if (!email) return res.status(400).json({ status: false, message: 'Email wajib diisi!' });
 
-    const targetEmail = formatTargetEmail(email);
+  const targetEmail = formatTargetEmail(email);
+  const verificationCode = "AM-VERIFY-" + Math.random().toString(36).substring(2, 10).toUpperCase();
+  const mockVerificationLink = `https://alightmotion.com/verify?code=${verificationCode}&email=${encodeURIComponent(targetEmail)}`;
 
-    // Buat Token / Link Verifikasi Acak
-    const verificationCode = "AM-VERIFY-" + Math.random().toString(36).substring(2, 10).toUpperCase();
-    const mockVerificationLink = `https://alightmotion.com/verify?code=${verificationCode}&email=${encodeURIComponent(targetEmail)}`;
+  pendingVerifications.set(targetEmail, verificationCode);
 
-    // Simpan ke memory untuk diverifikasi nanti
-    pendingVerifications.set(targetEmail, verificationCode);
+  res.json({
+    status: true,
+    message: `Link verifikasi berhasil dibuat untuk ${targetEmail}.`,
+    email: targetEmail,
+    verification_link: mockVerificationLink
+  });
+});
 
-    // Kirim Email berisi Link ke User
-    const mailOptions = {
-      from: `"Alight Motion Premium" <${process.env.GMAIL_USER}>`,
-      to: targetEmail,
-      subject: `Link Verifikasi Premium Alight Motion`,
-      html: `
-        <div style="font-family: Arial, sans-serif; background-color: #0b0e14; padding: 25px; color: #ffffff; border-radius: 12px; max-width: 480px; margin: auto;">
-          <h2 style="color: #00e676; text-align: center;">Alight Motion Premium</h2>
-          <p style="color: #ccc;">Halo <b>${targetEmail}</b>,</p>
-          <p style="color: #ccc;">Salin (copy) link verifikasi di bawah ini dan masukkan ke kolom <b>Verify Magic Link</b> di website dashboard:</p>
-          <div style="background: #151a23; padding: 12px; border-radius: 6px; font-family: monospace; word-break: break-all; color: #38ef7d; border: 1px solid #232d3f; margin: 15px 0;">
-            ${mockVerificationLink}
-          </div>
-          <p style="font-size: 11px; color: #8899a6;">Jangan klik link di atas. Cukup salin link-nya lalu tempelkan (paste) di menu verifikasi website.</p>
-        </div>
-      `
-    };
+app.get('/api/alight/verify', validateApiKey, (req, res) => {
+  let { email, link } = req.query;
+  if (!email || !link) return res.status(400).json({ status: false, message: 'Email dan link wajib diisi!' });
 
-    await transporter.sendMail(mailOptions);
-    res.json({ 
-      status: true, 
-      message: `Link verifikasi telah dikirim ke ${targetEmail}. Silakan cek kotak masuk/tempmail, salin linknya, lalu tempel di kolom Verify!`,
-      email: targetEmail 
-    });
+  const targetEmail = formatTargetEmail(email);
+  const storedCode = pendingVerifications.get(targetEmail);
 
-  } catch (error) {
-    res.status(500).json({ status: false, message: error.message });
+  if (!storedCode) return res.status(400).json({ status: false, message: 'Tidak ada verifikasi pending untuk email ini!' });
+
+  if (link.includes(storedCode)) {
+    pendingVerifications.delete(targetEmail);
+    return res.json({ status: true, message: `Verifikasi Berhasil! Akun ${targetEmail} resmi aktif Premium!`, email: targetEmail });
+  } else {
+    return res.status(400).json({ status: false, message: 'Link verifikasi tidak valid!' });
   }
 });
 
-// 2. ENDPOINT: Verify Magic Link
-app.get('/api/alight/verify', validateApiKey, async (req, res) => {
-  try {
-    let { email, link } = req.query;
-    if (!email || !link) {
-      return res.status(400).json({ status: false, message: 'Parameter email dan link wajib diisi!' });
-    }
+// ==================== ENDPOINT ADMIN PANEL ==================== //
 
-    const targetEmail = formatTargetEmail(email);
-    const storedCode = pendingVerifications.get(targetEmail);
-
-    if (!storedCode) {
-      return res.status(400).json({ status: false, message: 'Tidak ada permintaan verifikasi untuk email ini atau sudah kadaluwarsa!' });
-    }
-
-    // Cek apakah link yang ditempel mengandung kode verifikasi yang cocok
-    if (link.includes(storedCode)) {
-      pendingVerifications.delete(targetEmail);
-      return res.json({ 
-        status: true, 
-        message: `Verifikasi Berhasil! Akun ${targetEmail} resmi aktif Premium Alight Motion!`,
-        email: targetEmail
-      });
-    } else {
-      return res.status(400).json({ status: false, message: 'Link verifikasi tidak valid atau tidak cocok!' });
-    }
-
-  } catch (error) {
-    res.status(500).json({ status: false, message: error.message });
-  }
-});
-
-// ==================== ENDPOINT ADMIN MANAGEMENT API KEY ==================== //
-
-app.get('/api/admin/keys', validateAdminPin, (req, res) => {
+// Get Daftar API Keys
+app.get('/api/admin/keys', validateAdminCode, (req, res) => {
   res.json({ status: true, keys: getApiKeys() });
 });
 
-app.post('/api/admin/keys/add', validateAdminPin, (req, res) => {
+// Tambah API Key Baru
+app.post('/api/admin/keys/add', validateAdminCode, (req, res) => {
   const { key } = req.body;
-  if (!key) return res.status(400).json({ status: false, message: 'Key tidak boleh kosong!' });
-
+  if (!key) return res.status(400).json({ status: false, message: 'API Key tidak boleh kosong!' });
+  
   const keys = getApiKeys();
   if (keys.some(k => k.key === key)) {
-    return res.status(400).json({ status: false, message: 'API Key sudah ada!' });
+    return res.status(400).json({ status: false, message: 'API Key sudah terdaftar!' });
   }
-
+  
   keys.push({ key, active: true });
   saveApiKeys(keys);
-  res.json({ status: true, message: `API Key '${key}' berhasil ditambahkan.` });
+  res.json({ status: true, message: `API Key berhasil ditambahkan.` });
 });
 
-app.post('/api/admin/keys/toggle', validateAdminPin, (req, res) => {
+// Toggle Enable / Disable API Key
+app.post('/api/admin/keys/toggle', validateAdminCode, (req, res) => {
   const { key, active } = req.body;
   let keys = getApiKeys();
-
   const target = keys.find(k => k.key === key);
+  
   if (!target) return res.status(404).json({ status: false, message: 'API Key tidak ditemukan!' });
-
+  
   target.active = active;
   saveApiKeys(keys);
-  res.json({ status: true, message: `Status API Key '${key}' diperbarui.` });
+  res.json({ status: true, message: `Status API Key diperbarui.` });
 });
 
-app.post('/api/admin/keys/delete', validateAdminPin, (req, res) => {
+// Hapus API Key
+app.post('/api/admin/keys/delete', validateAdminCode, (req, res) => {
   const { key } = req.body;
   let keys = getApiKeys();
-
   keys = keys.filter(k => k.key !== key);
   saveApiKeys(keys);
-  res.json({ status: true, message: `API Key '${key}' berhasil dihapus.` });
+  res.json({ status: true, message: `API Key berhasil dihapus.` });
+});
+
+// Ganti Kode Rahasia Admin
+app.post('/api/admin/change-code', validateAdminCode, (req, res) => {
+  const { new_code } = req.body;
+  if (!new_code || new_code.trim().length < 4) {
+    return res.status(400).json({ status: false, message: 'Kode rahasia baru minimal 4 karakter!' });
+  }
+  
+  saveAdminCode(new_code.trim());
+  res.json({ status: true, message: 'Kode Rahasia Admin berhasil diubah!' });
 });
 
 app.listen(PORT, () => console.log(`Server aktif pada port ${PORT}`));
