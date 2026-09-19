@@ -88,7 +88,7 @@ app.get('/api/admin/keys', (req, res) => {
 app.post('/api/admin/keys', (req, res) => {
     const { admin_key, key_value, ordername } = req.body;
 
-    if (admin_key !== "6767") {
+    if (admin_key !== "676789") {
         return res.status(403).json({ success: false, error: "Admin Key salah! Akses ditolak." });
     }
 
