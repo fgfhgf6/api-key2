@@ -77,7 +77,7 @@ app.post('/api/am/verify', checkUserApiKey, async (req, res) => {
     res.json(premiumResult);
 });
 
-// ================= API ADMIN PANEL (KUNCI: 6767) =================
+// ================= API ADMIN PANEL (KUNCI: 676789) =================
 
 // 1. Ambil Semua Daftar API Key
 app.get('/api/admin/keys', (req, res) => {
